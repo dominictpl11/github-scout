@@ -16,7 +16,7 @@ description: Investigate a GitHub user's public repositories and produce a devel
 | 文件 | 内容 | 何时读 |
 |---|---|---|
 | `references/methodology.md` | 两阶段调查流程，每步的输入/判断/产出/降级 | 开始调查前必读 |
-| `references/repo-ranking.md` | 过滤规则与评分模型 | 进入 Step 3 前必读 |
+| `references/repo-ranking.md` | 过滤规则与三阶段评分模型 | 进入 Step 3 前必读 |
 | `references/report-format.md` | 报告结构与填写规则 | 进入 Step 6 前必读 |
 
 这三份文件由 `core/` 同步而来，是唯一真源。**遇到规则冲突时以它们为准**，不要在本文件里另立规则。
@@ -67,7 +67,8 @@ isFork,isArchived,isEmpty,isTemplate,createdAt,pushedAt,diskUsage,url,parent
 - 交叉校验：返回条数应与 `gh api users/{username} --jq .public_repos` 一致。**条数偏多说明取到了非公开仓库，停下来检查**；条数正好等于 `--limit` 且小于 public_repos，属于被 limit 截断，是正常的，转入下面的粗筛分支
 - 仓库数 > 100 时，先按 `pushedAt` 和 `stargazerCount` 粗筛前 50 个候选，控制预算
 - `languages` 字段给出每种语言的字节数，用于 Step 6 的加权语言统计
-- `diskUsage`（KB）用于 Step 4 的代码规模估算
+- **`diskUsage` 只能判断仓库是否几乎为空（≤2 KB），绝不能用于估算代码规模。** 它含图片与构建产物，实测偏差可达 4,200 倍。真实代码规模在 Step 5a 用语言字节数计算
+- 命令失败（GraphQL 504 等）**重试一次**；仍失败则降低 `--limit` 分批取回，不要跳过——后续所有步骤都依赖这份全集
 
 用户近期公开活动：
 
@@ -78,23 +79,39 @@ gh api users/{username}/events/public --jq \
 
 ### Step 3 · 仓库过滤
 
-纯判断步骤，无工具调用。按 `references/repo-ranking.md` 第一节分类。
+按 `references/repo-ranking.md` 第一节分类。命名、来源、结构三类信号纯元数据判断，无调用。
 
-教程/模板识别需要 README 时，用轻量方式只取开头：
+README 与 commit message 信号需要读取，**只对元数据粗排后的前 15 个候选做**——对上百个仓库逐个抓 README 会使调用量翻倍：
 
 ```bash
 gh api repos/{username}/{repo}/readme -H "Accept: application/vnd.github.raw" 2>/dev/null | head -40
 ```
 
-### Step 4 · 代表项目排序
+### Step 4 · 粗筛
 
-纯计算步骤，无工具调用。按 `references/repo-ranking.md` 第二、三节打分并应用降权系数。
+纯计算步骤，无工具调用。**这一步不做最终排名。**
 
-此时只有元数据，代码规模按 `diskUsage` 估算（注意排除仓库内的大体积资源文件），进入 Step 5 后修正。
+只用元数据可算的三项——影响力、最近 push、owner 身份，33 分制（见 `references/repo-ranking.md` 第六节），应用降权系数后取前 `max(12, top_n × 2)` 个候选。
 
-### Step 5 · 深度分析
+**不要用 `diskUsage` 补代码规模，不要用 `createdAt→pushedAt` 补 commit 跨度。** 拿不到的信号计 0 分——用错误的代理比少给分危害大得多。
 
-对 Top N（默认 5）逐个执行。**这一步是预算大头，只对入选项目做。**
+### Step 5a · 主排序
+
+对 12 个候选各两次调用。**决定最终 Top N 的是这一步，不是 Step 4。**
+
+```bash
+# 真实代码规模：各语言源码字节数（约 30 字节 ≈ 1 行）
+gh api repos/{owner}/{repo}/languages
+
+# commit 总数（贡献者求和，近似值）与本人占比
+gh api "repos/{owner}/{repo}/contributors?per_page=100" --jq '.[] | "\(.login)\t\(.contributions)"'
+```
+
+按 66 分制打分（见 `references/repo-ranking.md` 第六节），应用降权系数，同分按 stars 降序、再按仓库名字典序破平。取 Top N。
+
+### Step 5b · 深度分析
+
+只对 Step 5a 选出的 Top N 执行。这一步可调整 Top N 内部顺序，但**不改变入选名单**。
 
 ```bash
 # README —— 判断项目意图的首要依据
@@ -103,40 +120,23 @@ gh api repos/{owner}/{repo}/readme -H "Accept: application/vnd.github.raw"
 # 目录结构 —— 判断架构组织方式
 gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[].path' | head -200
 
-# 语言构成（字节数）
-gh api repos/{owner}/{repo}/languages
-
-# 贡献者与 commit 占比
-gh api repos/{owner}/{repo}/contributors --jq '.[] | "\(.login)\t\(.contributions)"'
-
-# 最近一次 commit
-gh api "repos/{owner}/{repo}/commits?per_page=1" --jq '.[0].commit.author.date'
-
-# 本人的 commit 时间跨度：最近一条与最早一条
-gh api "repos/{owner}/{repo}/commits?author={username}&per_page=1" \
-  --jq '.[0].commit.author.date'
-```
-
-**commit 时间跨度**（评分需要）：先取最后一页页码，再取该页最早一条。
-
-```bash
-# 从 Link 头拿到末页页码
-gh api "repos/{owner}/{repo}/commits?per_page=1" -i 2>/dev/null \
-  | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"'
-# 再取末页
-gh api "repos/{owner}/{repo}/commits?per_page=1&page={last}" --jq '.[0].commit.author.date'
-```
-
-**技术栈判定**：以依赖清单为准，README 声明作为佐证。按语言取对应文件：
-
-```bash
+# 依赖清单 —— 技术栈以此为准，README 声明只作佐证
 gh api repos/{owner}/{repo}/contents/{package.json|requirements.txt|pyproject.toml|go.mod|Cargo.toml|pom.xml} \
   -H "Accept: application/vnd.github.raw" 2>/dev/null
 ```
 
+**commit 时间跨度**：先从 Link 头取末页页码（即 commit 总数），再取该页最早一条。
+
+```bash
+gh api "repos/{owner}/{repo}/commits?per_page=1" -i 2>/dev/null \
+  | grep -i '^link:' | grep -o 'page=[0-9]*>; rel="last"'
+gh api "repos/{owner}/{repo}/commits?per_page=1&page={last}" --jq '.[0].commit.author.date'
+```
+
 **架构复杂度**：从目录树观察模块划分、`tests/`、`.github/workflows/` 的存在，**不看代码行数**。
 
-**降级**：任一调用失败（仓库已删除、转私有、无 README）按 `references/methodology.md` Step 5 的降级处理，并记入数据缺口。
+**降级**：任一调用失败（仓库已删除、转私有、无 README）按 `references/methodology.md` 的降级处理，并记入数据缺口。
+**降级**：任一调用失败（仓库已删除、转私有、无 README）按 `references/methodology.md` Step 5b 的降级处理，并记入数据缺口。
 
 ### Step 6 · 画像生成
 
@@ -147,7 +147,8 @@ gh api repos/{owner}/{repo}/contents/{package.json|requirements.txt|pyproject.to
 ## 执行纪律
 
 - **广度在前，深度在后**——Step 2 只取元数据，Step 5 才读内容。这是预算不失控的关键。
-- **并行调用**——Step 5 中同一仓库的多个 `gh api` 之间无依赖，放在同一条消息里并行执行。
+- **并行调用**——Step 5a 的 24 次调用彼此无依赖，Step 5b 中同一仓库的多个调用也无依赖，都放在同一条消息里并行执行。
+- **预算参考**：Step 1-2 约 2 次、Step 3 ≤15 次、Step 5a 24 次（12 候选 × 2）、Step 5b 约 25 次（5 项目 × 5），合计约 66 次，上限 80 次。
 - **不写脚本代替判断**——评分依赖对 README 和目录结构的语义理解，不要试图用 shell 脚本自动打分。
 - **失败不静默**——任何调用失败都要记入报告的「数据说明」。
 - **只用公开数据**——不访问私有仓库，不获取需额外授权的信息。
