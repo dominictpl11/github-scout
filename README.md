@@ -1,122 +1,173 @@
 # GitHub Scout
 
-> **AI-powered GitHub developer intelligence skill for ChatGPT and Claude.**
+> **An evidence-backed GitHub developer intelligence skill for Claude and Codex.**
 
-输入一个 GitHub 用户名，自动调查其公开仓库与活动，产出开发者技术画像：在做什么方向、技术栈是什么、哪些是真正的代表作、维护得是否持续。
+GitHub Scout investigates a user's public GitHub repositories and activity, then
+produces a traceable, neutral technical profile: what they build, which
+technologies they use, which projects are most representative, and how their
+work has evolved over time.
 
-## 它解决什么问题
+## What it solves
 
-看一个人的 GitHub 主页，最费时的不是读代码，而是**从几十个仓库里分辨出哪三个值得看**。fork、课程作业、跟着教程敲的 demo 常常和真正的作品混在一起，按 star 排序在学生和普通开发者身上完全失效——大家的 star 都是 0。
+The difficult part of reviewing a GitHub profile is not opening one repository.
+It is separating meaningful work from forks, coursework, tutorial follow-alongs,
+and small experiments across dozens of repositories. Star counts alone are a
+poor signal for students and early-career developers.
 
-GitHub Scout 把这个判断过程写成了一套明确的规则：先用元数据覆盖全部仓库，按技术价值、活跃度、个人贡献、影响力四个维度打分并对 fork 与教程项目降权，再只对排名靠前的少数项目做深度分析。
+GitHub Scout uses a staged workflow:
 
-## 设计取向
+1. Inventory the user's complete public repository set.
+2. Filter and rank candidates using technical value, activity, ownership, and
+   public impact signals.
+3. Downweight forks and tutorial-like projects without discarding them silently.
+4. Read the strongest candidates in depth and cite the evidence in the report.
 
-- **降权而非排除**——即使一个用户的仓库全是 fork，也要产出有依据的结论，而不是「无可分析内容」
-- **结论可回溯**——每条判断都能指向具体仓库、数据或时间区间
-- **缺口显式声明**——无法核实的数据写进报告，不静默略过
-- **描述而非评判**——输出技术画像，不对人做能力排名
+## Design principles
 
-## 架构：Core + Adapters
+- **Downweight, do not erase:** weak signals still produce an explained result.
+- **Traceable conclusions:** each claim points to a repository, data point, or
+  time range.
+- **Explicit gaps:** unavailable or estimated data is stated instead of hidden.
+- **Description over judgment:** the output is a technical profile, not a score
+  for a person.
 
-这个 Skill 的本质是一套**调查工作流**，不是某个模型独有的能力。因此核心逻辑与平台适配分离：
+## Architecture: core plus adapters
+
+The project is a research workflow rather than a model-specific implementation.
+The rules live in `core/`; each platform adapter packages those rules for its
+own runtime and tool conventions.
 
 ```text
 github-scout/
-├── core/                       # 唯一真源 —— 人只改这里
-│   ├── methodology.md          #   两阶段调查流程
-│   ├── repo-ranking.md         #   过滤规则与评分模型
-│   └── report-format.md        #   报告结构与填写规则
+├── core/                       # Single source of truth
+│   ├── methodology.md          # Investigation workflow
+│   ├── repo-ranking.md         # Filtering and ranking model
+│   └── report-format.md        # Report structure and writing rules
 │
-├── claude/
-│   ├── SKILL.md                # Claude 适配层：工具映射
-│   └── references/             # 构建产物 —— 不要手改
+├── claude/                     # Claude adapter
+│   ├── SKILL.md
+│   └── references/             # Generated adapter copy
+│
+├── codex/                      # Codex adapter
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   └── references/             # Generated adapter copy
 │
 ├── scripts/
-│   └── sync.ps1                # core/ → 各 adapter 的 references/
+│   └── sync.ps1                # Sync core/ into adapter references/
 │
-├── README.md
-└── GitHub Scout Skill 设计思路文档.md
+├── reports/                    # Local investigation output; ignored by Git
+└── README.md
 ```
 
-约 80% 的逻辑在 `core/`，adapter 只负责剩下 20% 的工具映射与平台指令包装。新增一个平台等于新增一个 adapter，而不是把整套逻辑重做一遍。
-
-### core/ 与 references/ 的关系
-
-Claude Skill 按**目录自包含**分发——`claude/SKILL.md` 若直接引用 `../core/`，skill 被复制或打包安装后会断链。
-
-因此：
-
-- `core/` 是唯一真源，**所有规则改动都在这里做**
-- `scripts/sync.ps1` 把 `core/*.md` 同步到各 adapter 的 `references/`
-- adapter 只引用自己目录内的 `references/*.md`
-- **`references/` 是构建产物，不要手改**，改动会在下次同步时被覆盖
+`core/` is the only source of truth for methodology and scoring rules. Do not
+edit adapter `references/` files by hand. After changing `core/`, run:
 
 ```powershell
-# 修改 core/ 之后运行
 .\scripts\sync.ps1
-
-# 校验是否同步（不写入，不同步则退出码 1，适合 CI）
 .\scripts\sync.ps1 -Check
 ```
 
-## 安装（Claude）
+The `-Check` form writes nothing and is suitable for validation or CI.
 
-需要 [GitHub CLI](https://cli.github.com/) 并已登录：
+## Requirements
 
-```bash
-gh auth status   # 未登录则运行 gh auth login
+- GitHub CLI (`gh`) is recommended for authenticated API access.
+- Without `gh` authentication, the adapters can fall back to public GitHub
+  pages/API access with a narrower data set; the report must state that
+  limitation.
+
+Check the CLI session with:
+
+```powershell
+gh auth status
 ```
 
-把 skill 目录复制到 Claude 的 skills 目录：
+## Installation
+
+Synchronize the adapters first:
 
 ```powershell
 .\scripts\sync.ps1
+```
+
+### Claude
+
+Copy the self-contained Claude adapter into the Claude skills directory:
+
+```powershell
 Copy-Item -Recurse .\claude "$env:USERPROFILE\.claude\skills\github-scout"
 ```
 
-未安装 `gh` 也能用，会降级为公开页面读取，功能范围收窄，报告中会注明。
+### Codex
 
-## 使用
+Copy the self-contained Codex adapter into the `github-scout` directory under
+your Codex skills directory. For example, when `CODEX_HOME` is configured:
 
+```powershell
+Copy-Item -Recurse .\codex "$env:CODEX_HOME\skills\github-scout"
 ```
+
+Start a new session after installation, then invoke the skill with a public
+GitHub username or profile URL.
+
+## Usage
+
+Examples:
+
+```text
+Investigate the GitHub user torvalds.
+Use $github-scout to profile octocat's strongest projects.
+```
+
+The workflow accepts these report controls:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `top_n` | `5` | Number of projects to analyze deeply; valid range is 1–10. |
+| `depth` | `standard` | `quick` uses metadata only; `standard` follows the normal workflow; `deep` adds complete commit-history analysis. |
+| `focus` | none | A topic that changes report emphasis but does not change ranking. |
+
+## Output
+
+The result is a Markdown report with a stable structure:
+
+- profile and account information;
+- technical direction and primary technologies;
+- representative projects, complexity signals, and scores;
+- GitHub activity and maintenance history;
+- an overall evidence-based summary;
+- all data gaps, estimates, and methodological limitations.
+
+## Boundaries
+
+GitHub Scout does not:
+
+- access private repositories or data requiring extra authorization;
+- perform static code-quality scanning, security audits, or complexity counts;
+- rank a person's worth or claim to measure their ability;
+- crawl platforms outside GitHub;
+- generate unsupported negative judgments about individuals.
+
+The output may be used in high-impact contexts such as recruiting, so claims
+outside the available public evidence are intentionally excluded.
+
+## Documentation
+
+The Chinese design document contains the original requirements, acceptance
+criteria, non-goals, and full scoring rationale:
+
+[GitHub Scout Skill 设计思路文档.md](GitHub%20Scout%20Skill%20设计思路文档.md)
+
+## 中文简介
+
+GitHub Scout 会调查 GitHub 用户的公开仓库和活动，输出可回溯、克制的
+开发者技术画像。`core/` 是规则唯一真源，Claude 和 Codex 目录是各自的
+自包含适配层；修改规则后运行 `scripts\sync.ps1` 同步 references。
+
+示例：
+
+```text
 调查一下 GitHub 用户 torvalds
-看看 octocat 的项目都在做什么方向
-github-scout {username} --top-n 3
+使用 $github-scout 分析 octocat 最有代表性的项目
 ```
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `top_n` | 5 | 深度分析的项目数，范围 1～10 |
-| `depth` | `standard` | `quick` 仅元数据 ｜ `standard` ｜ `deep` 含完整 commit 历史 |
-| `focus` | 无 | 关注方向提示，影响报告侧重，不影响排序 |
-
-## 输出
-
-一份 Markdown 报告，章节固定：基本信息、技术方向、代表项目（含复杂度星级与得分）、GitHub 活跃度、综合评价、数据说明。
-
-最后一节列出本次调查的全部数据缺口与估算项——它是报告可信度的基础。
-
-## 不做什么
-
-- 不访问私有仓库或任何需额外授权的数据
-- 不做代码质量静态扫描（不跑 linter、不算圈复杂度、不做安全审计）
-- 不对人做价值排名或打分
-- 不爬取 GitHub 之外的平台
-- 不生成对个人的负面判断
-
-报告可能被用于招聘初筛等有实际影响的场景，因此任何超出公开数据支持范围的评价都被刻意排除在外。
-
-## 路线图
-
-| 阶段 | 范围 |
-|---|---|
-| **M1** | core 三件套 + Claude adapter，端到端跑通 |
-| **M2** | ChatGPT adapter；同一用户在两平台结论一致 |
-| **M3** | AI 项目识别、项目真实性分析、技术成长轨迹、横向比较 |
-
-更远期可扩展到 Codex / Cursor / Gemini —— 每个只是一个新 adapter。
-
-## 文档
-
-设计背景、需求规格（功能需求、验收标准、非目标）与完整评分细则见 [GitHub Scout Skill 设计思路文档.md](GitHub%20Scout%20Skill%20设计思路文档.md)。

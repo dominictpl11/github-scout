@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Scout"
+  short_description: "Profile public GitHub projects and developer activity"
+  default_prompt: "Use $github-scout to investigate a public GitHub profile and identify its strongest repositories."
