@@ -152,6 +152,14 @@ GitHub Scout does not:
 The output may be used in high-impact contexts such as recruiting, so claims
 outside the available public evidence are intentionally excluded.
 
+## Privacy and responsible use
+
+GitHub Scout uses only publicly accessible GitHub data and does not access
+private repositories or private email addresses. Do not use its reports to
+infer sensitive personal traits or as the sole basis for hiring or other
+high-impact decisions. Treat generated reports as local output and do not
+commit them to this repository.
+
 ## Documentation
 
 The Chinese design document contains the original requirements, acceptance

@@ -1,2 +1,9 @@
 # Local reports generated during investigations
 /reports/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
